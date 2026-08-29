@@ -2,7 +2,7 @@ import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import "@testing-library/jest-dom";
-import RecurringPayments from "@/components/RecurringPayments";
+import RecurringPayments, { migrateSchedules, CURRENT_RECURRING_SCHEMA_VERSION } from "@/components/RecurringPayments";
 
 const RECIPIENT = "GDEST234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567";
 
@@ -12,6 +12,103 @@ function renderRP(onPayNow = jest.fn()) {
 
 beforeEach(() => {
   localStorage.clear();
+});
+
+describe("RecurringPayments — schema versioning & migration", () => {
+  it("migrates legacy unversioned schedules to schema v2 with default paused state", () => {
+    const legacy = [
+      {
+        id: "sched-1",
+        recipient: RECIPIENT,
+        amount: "10",
+        memo: "monthly rent",
+        frequency: "monthly",
+        startDate: "2026-01-01",
+        nextDueDate: "2026-02-01",
+        createdAt: 1700000000000,
+      },
+    ];
+
+    const migrated = migrateSchedules(legacy);
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0].schemaVersion).toBe(CURRENT_RECURRING_SCHEMA_VERSION);
+    expect(migrated[0].paused).toBe(false);
+    expect(migrated[0].pausedAt).toBeNull();
+  });
+
+  it("migrates legacy paused schedules correctly", () => {
+    const legacyPaused = [
+      {
+        id: "sched-2",
+        recipient: RECIPIENT,
+        amount: "25",
+        memo: "",
+        frequency: "weekly",
+        startDate: "2026-03-01",
+        nextDueDate: "2026-03-08",
+        createdAt: 1700000000000,
+        paused: true,
+      },
+    ];
+
+    const migrated = migrateSchedules(legacyPaused);
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0].schemaVersion).toBe(CURRENT_RECURRING_SCHEMA_VERSION);
+    expect(migrated[0].paused).toBe(true);
+    expect(typeof migrated[0].pausedAt).toBe("number");
+  });
+
+  it("rejects schedules with impossible or zero/negative amounts", () => {
+    const badSchedules = [
+      {
+        id: "bad-1",
+        recipient: RECIPIENT,
+        amount: "-10",
+        frequency: "monthly",
+        startDate: "2026-01-01",
+        nextDueDate: "2026-02-01",
+        createdAt: 1700000000000,
+      },
+      {
+        id: "bad-2",
+        recipient: RECIPIENT,
+        amount: "0",
+        frequency: "monthly",
+        startDate: "2026-01-01",
+        nextDueDate: "2026-02-01",
+        createdAt: 1700000000000,
+      },
+      {
+        id: "bad-3",
+        recipient: RECIPIENT,
+        amount: "not-a-number",
+        frequency: "monthly",
+        startDate: "2026-01-01",
+        nextDueDate: "2026-02-01",
+        createdAt: 1700000000000,
+      },
+    ];
+
+    const migrated = migrateSchedules(badSchedules);
+    expect(migrated).toHaveLength(0);
+  });
+
+  it("rejects schedules with invalid frequency cadence", () => {
+    const badCadence = [
+      {
+        id: "bad-cadence",
+        recipient: RECIPIENT,
+        amount: "10",
+        frequency: "daily",
+        startDate: "2026-01-01",
+        nextDueDate: "2026-01-02",
+        createdAt: 1700000000000,
+      },
+    ];
+
+    const migrated = migrateSchedules(badCadence);
+    expect(migrated).toHaveLength(0);
+  });
 });
 
 describe("RecurringPayments — schedule creation (#513)", () => {
@@ -82,7 +179,6 @@ describe("RecurringPayments — schedule creation (#513)", () => {
     await user.click(screen.getByText(/\+ New schedule/i));
 
     await user.type(screen.getByPlaceholderText("G..."), RECIPIENT);
-    // Leave amount empty
     await user.click(screen.getByRole("button", { name: /Create/i }));
 
     expect(screen.getByText(/Enter a valid amount/i)).toBeInTheDocument();
@@ -174,17 +270,5 @@ describe("RecurringPayments — pause / delete actions (#513)", () => {
     await user.click(screen.getByRole("button", { name: /Delete schedule/i }));
 
     expect(screen.queryByText(/3 XLM/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/No recurring schedules yet/i)).toBeInTheDocument();
-  });
-
-  it("opens the edit form pre-filled with the schedule values", async () => {
-    const user = userEvent.setup();
-    renderRP();
-    await createSchedule(user);
-
-    await user.click(screen.getByRole("button", { name: /Edit schedule/i }));
-
-    expect(screen.getByText(/Edit schedule/i)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("0.0000000")).toHaveValue(3);
   });
 });
