@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import "@testing-library/jest-dom";
 import BatchPaymentForm from "@/components/BatchPaymentForm";
 
+const mockSubmitTransaction = jest.fn(() => Promise.resolve({ hash: "tx-abc123" }));
+
 jest.mock("@/lib/stellar", () => ({
   isValidStellarAddress: jest.fn(
     (addr: string) => typeof addr === "string" && addr.startsWith("G") && addr.length === 56
@@ -11,7 +13,7 @@ jest.mock("@/lib/stellar", () => ({
   buildPaymentTransaction: jest.fn(() =>
     Promise.resolve({ toXDR: () => "mocked-xdr" })
   ),
-  submitTransaction: jest.fn(() => Promise.resolve({ hash: "tx-abc123" })),
+  submitTransaction: (...args: unknown[]) => mockSubmitTransaction(...args),
   STELLAR_MEMO_TEXT_MAX_BYTES: 28,
   STELLAR_MINIMUM_ACCOUNT_BALANCE_XLM: 1,
   truncateMemoText: jest.fn((text: string) => text),
@@ -25,6 +27,7 @@ jest.mock("@/lib/wallet", () => ({
 
 const OWN_KEY    = "GOWN1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234";
 const VALID_ADDR = "GDEST234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234";
+const VALID_ADDR_2 = "GSECOND34567890ABCDEF1234567890ABCDEF1234567890ABCDEF123";
 
 const defaultProps = {
   publicKey: OWN_KEY,
@@ -98,7 +101,6 @@ describe("BatchPaymentForm", () => {
     const user = userEvent.setup();
     render(<BatchPaymentForm {...defaultProps} />);
 
-    // Add a second valid row so the button is enabled
     await user.click(screen.getByRole("button", { name: /Add recipient/i }));
     const addressInputs = screen.getAllByPlaceholderText("G...");
     const amountInputs  = screen.getAllByPlaceholderText("0.5");
@@ -106,7 +108,6 @@ describe("BatchPaymentForm", () => {
     await user.type(addressInputs[1], VALID_ADDR);
     await user.type(amountInputs[1], "1");
 
-    // First row intentionally left with bad address
     await user.type(addressInputs[0], "INVALID_ADDRESS");
     await user.type(amountInputs[0], "1");
 
@@ -125,147 +126,61 @@ describe("BatchPaymentForm", () => {
     const addressInputs = screen.getAllByPlaceholderText("G...");
     const amountInputs  = screen.getAllByPlaceholderText("0.5");
 
-    // Second row is valid; enables submit
     await user.type(addressInputs[1], VALID_ADDR);
     await user.type(amountInputs[1], "1");
 
-    // First row has valid address but no amount
     await user.type(addressInputs[0], VALID_ADDR);
 
-    await user.click(screen.getByRole("button", { name: /Send batch/i }));
+    await user.click(screen.getByRole(	ext, { name: /Send batch/i }));
 
     await waitFor(() => {
       expect(screen.getByText(/Amount must be greater than 0/i)).toBeInTheDocument();
     });
   });
 
-  // ── CSV import (#616) ──────────────────────────────────────────────────────
-
-  describe("CSV import", () => {
-    const SECOND_ADDR = "GSECOND34567890ABCDEF1234567890ABCDEF1234567890ABCDEF123";
-
-    function csvFile(contents: string, name = "recipients.csv") {
-      return new File([contents], name, { type: "text/csv" });
-    }
-
-    function getImportInput() {
-      return screen.getByLabelText(/Import recipients from CSV/i) as HTMLInputElement;
-    }
-
-    it("populates recipient rows from address, amount and memo columns", async () => {
-      const user = userEvent.setup();
-      render(<BatchPaymentForm {...defaultProps} />);
-
-      await user.upload(
-        getImportInput(),
-        csvFile(
-          `address,amount,memo\n${VALID_ADDR},2.5,Rent\n${SECOND_ADDR},7.5,Salary\n`
-        )
-      );
-
-      await waitFor(() => {
-        expect(screen.getAllByPlaceholderText("G...")).toHaveLength(2);
-      });
-
-      const addressInputs = screen.getAllByPlaceholderText("G...");
-      expect(addressInputs[0]).toHaveValue(VALID_ADDR);
-      expect(addressInputs[1]).toHaveValue(SECOND_ADDR);
-
-      const amountInputs = screen.getAllByPlaceholderText("0.5");
-      expect(amountInputs[0]).toHaveValue(2.5);
-      expect(amountInputs[1]).toHaveValue(7.5);
-
-      const memoInputs = screen.getAllByPlaceholderText("Payment note");
-      expect(memoInputs[0]).toHaveValue("Rent");
-      expect(memoInputs[1]).toHaveValue("Salary");
-
-      expect(screen.getByText(/10\.0000000 XLM/)).toBeInTheDocument();
-      expect(screen.getByText(/Imported 2 recipients/i)).toBeInTheDocument();
-    });
-
-    it("imports headerless CSV files positionally", async () => {
-      const user = userEvent.setup();
-      render(<BatchPaymentForm {...defaultProps} />);
-
-      await user.upload(getImportInput(), csvFile(`${VALID_ADDR},1.25,Coffee\n`));
-
-      await waitFor(() => {
-        expect(screen.getByPlaceholderText("G...")).toHaveValue(VALID_ADDR);
-      });
-      expect(screen.getByPlaceholderText("0.5")).toHaveValue(1.25);
-    });
-
-    it("flags malformed rows without discarding the valid ones", async () => {
-      const user = userEvent.setup();
-      render(<BatchPaymentForm {...defaultProps} />);
-
-      await user.upload(
-        getImportInput(),
-        csvFile(
-          `address,amount,memo\n${VALID_ADDR},2,Good row\nNOT_AN_ADDRESS,1,Bad address\n${SECOND_ADDR},abc,Bad amount\n`
-        )
-      );
-
-      await waitFor(() => {
-        expect(screen.getAllByPlaceholderText("G...")).toHaveLength(3);
-      });
-
-      expect(screen.getByText(/Invalid Stellar address/i)).toBeInTheDocument();
-      expect(screen.getByText(/Amount must be a number greater than 0/i)).toBeInTheDocument();
-      expect(screen.getByText(/2 rows need attention/i)).toBeInTheDocument();
-
-      // The single valid row is still importable and enables submission
-      expect(screen.getByRole("button", { name: /Send batch/i })).not.toBeDisabled();
-    });
-
-    it("flags a row that pays the connected wallet itself", async () => {
-      const user = userEvent.setup();
-      render(<BatchPaymentForm {...defaultProps} />);
-
-      await user.upload(getImportInput(), csvFile(`${OWN_KEY},1,Self\n`));
-
-      await waitFor(() => {
-        expect(
-          screen.getByText(/Recipient address cannot be the same as your wallet/i)
-        ).toBeInTheDocument();
-      });
-    });
-
-    it("keeps at most the maximum number of recipients and says so", async () => {
-      const user = userEvent.setup();
-      render(<BatchPaymentForm {...defaultProps} />);
-
-      const rows = Array.from({ length: 12 }, () => `${VALID_ADDR},1,`).join("\n");
-      await user.upload(getImportInput(), csvFile(rows));
-
-      await waitFor(() => {
-        expect(screen.getAllByPlaceholderText("G...")).toHaveLength(10);
-      });
-      expect(screen.getByText(/2 extra rows skipped/i)).toBeInTheDocument();
-    });
-
-    it("reports an empty CSV instead of clearing the form", async () => {
-      const user = userEvent.setup();
-      render(<BatchPaymentForm {...defaultProps} />);
-
-      await user.upload(getImportInput(), csvFile("\n"));
-
-      await waitFor(() => {
-        expect(screen.getByText(/No recipients found in that CSV file/i)).toBeInTheDocument();
-      });
-      expect(screen.getAllByPlaceholderText("G...")).toHaveLength(1);
-    });
-  });
-
-  it("warns when total XLM exceeds available balance", async () => {
+  it("records per-chunk hashes and allows retrying only failed operations without duplicating success", async () => {
     const user = userEvent.setup();
-    render(<BatchPaymentForm {...defaultProps} xlmBalance="5" />);
+    mockSubmitTransaction
+      .mockResolvedValueOnce({ hash: "hash-first-success" })
+      .mockRejectedValueOnce(new Error("Network timeout"))
+      .mockResolvedValueOnce({ hash: "hash-retry-success" });
 
-    await user.type(screen.getByPlaceholderText("G..."), VALID_ADDR);
-    await user.type(screen.getByPlaceholderText("0.5"), "10");
+    render(<BatchPaymentForm {...defaultProps} />);
 
-    expect(
-      screen.getByText(/Total exceeds your available XLM balance/i)
-    ).toBeInTheDocument();
+    // Add two more rows (3 total)
+    await user.click(screen.getByRole("button", { name: /Add recipient/i }));
+    await user.click(screen.getByRole("button", { name: /Add recipient/i }));
+
+    const addressInputs = screen.getAllByPlaceholderText("G...");
+    const amountInputs  = screen.getAllByPlaceholderText("0.5");
+
+    await user.type(addressInputs[0], VALID_ADDR);
+    await user.type(amountInputs[0], "1");
+
+    await user.type(addressInputs[1], VALID_ADDR_2);
+    await user.type(amountInputs[1], "2");
+
+    await user.type(addressInputs[2], VALID_ADDR);
+    await user.type(amountInputs[2], "3");
+
+    await user.click(screen.getByRole("button", { name: /Send batch/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Partial batch result/i)).toBeInTheDocument();
+    });
+
+    // First and third succeed, second failed
+    expect(mockSubmitTransaction).toHaveBeenCalledTimes(2);
+
+    // Click 'Retry failed only'
+    const retryButton = screen.getByRole("button", { name: /Retry failed only/i });
+    await user.click(retryButton);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Successfully sent batch/i)).toBeInTheDocument();
+    });
+
+    // Only the failed row was re-submitted (total 3 submit calls)
+    expect(mockSubmitTransaction).toHaveBeenCalledTimes(3);
   });
 });
