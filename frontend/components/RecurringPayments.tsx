@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { formatXLM } from "@/utils/format";
 
 export const CURRENT_RECURRING_SCHEMA_VERSION = 2;
@@ -30,9 +30,22 @@ export interface RecurringScheduleV2 {
   pausedAt: number | null;
 }
 
-export type RecurringSchedule = RecurringScheduleV2;
+export const RECURRING_SCHEDULES_STORAGE_KEY = "stellar-micropay:recurring-schedules";
 
-const STORAGE_KEY = "stellar-micropay:recurring-schedules";
+function isValidSchedule(value: unknown): value is RecurringSchedule {
+  if (!value || typeof value !== "object") return false;
+  const schedule = value as RecurringSchedule;
+  return (
+    typeof schedule.id === "string" &&
+    typeof schedule.recipient === "string" &&
+    typeof schedule.amount === "string" &&
+    typeof schedule.memo === "string" &&
+    (schedule.frequency === "weekly" || schedule.frequency === "monthly") &&
+    typeof schedule.startDate === "string" &&
+    typeof schedule.nextDueDate === "string" &&
+    typeof schedule.createdAt === "number"
+  );
+}
 
 export function migrateSchedules(rawItems: unknown[]): RecurringSchedule[] {
   if (!Array.isArray(rawItems)) return [];
@@ -102,8 +115,11 @@ export function migrateSchedules(rawItems: unknown[]): RecurringSchedule[] {
 function loadSchedules(): RecurringSchedule[] {
   if (typeof window === "undefined") return [];
   try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-    return migrateSchedules(stored);
+    const raw = localStorage.getItem(RECURRING_SCHEDULES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isValidSchedule);
   } catch {
     return [];
   }
@@ -111,7 +127,7 @@ function loadSchedules(): RecurringSchedule[] {
 
 function saveSchedules(schedules: RecurringSchedule[]) {
   if (typeof window === "undefined") return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(schedules));
+  localStorage.setItem(RECURRING_SCHEDULES_STORAGE_KEY, JSON.stringify(schedules));
 }
 
 // Serialize a Date to a YYYY-MM-DD string using its *local* components.
@@ -178,18 +194,28 @@ const EMPTY_FORM: FormState = {
 
 export default function RecurringPayments({ onPayNow }: RecurringPaymentsProps) {
   const [schedules, setSchedules] = useState<RecurringSchedule[]>([]);
+  const [hydrated, setHydrated] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
+  
+  // A11y enhancements
+  const [announcement, setAnnouncement] = useState("");
+  const headingRef = React.useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     setSchedules(loadSchedules());
+    setHydrated(true);
   }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveSchedules(schedules);
+  }, [schedules, hydrated]);
 
   const persist = (updated: RecurringSchedule[]) => {
     setSchedules(updated);
-    saveSchedules(updated);
   };
 
   const resetForm = () => {
@@ -234,6 +260,7 @@ export default function RecurringPayments({ onPayNow }: RecurringPaymentsProps) 
           : s
       );
       persist(updated);
+      announce("Schedule updated.");
     } else {
       const newSchedule: RecurringSchedule = {
         schemaVersion: CURRENT_RECURRING_SCHEMA_VERSION,
@@ -249,6 +276,7 @@ export default function RecurringPayments({ onPayNow }: RecurringPaymentsProps) 
         pausedAt: null,
       };
       persist([...schedules, newSchedule]);
+      announce("Schedule created.");
     }
     resetForm();
   };
@@ -274,6 +302,7 @@ export default function RecurringPayments({ onPayNow }: RecurringPaymentsProps) 
         : s
     );
     persist(updated);
+    announce("Schedule paused.");
   };
 
   const handleResume = (id: string) => {
@@ -283,10 +312,16 @@ export default function RecurringPayments({ onPayNow }: RecurringPaymentsProps) 
         : s
     );
     persist(updated);
+    announce("Schedule resumed.");
   };
 
   const handleDelete = (id: string) => {
     persist(schedules.filter((s) => s.id !== id));
+    announce("Schedule deleted.");
+    // Return focus after deletion to the main heading
+    setTimeout(() => {
+      headingRef.current?.focus();
+    }, 0);
   };
 
   const handlePayNow = (s: RecurringSchedule) => {
@@ -305,8 +340,17 @@ export default function RecurringPayments({ onPayNow }: RecurringPaymentsProps) 
 
   return (
     <div className="card mb-6">
+      {/* Invisible live region for screen readers */}
+      <div aria-live="polite" className="sr-only" aria-atomic="true">
+        {announcement}
+      </div>
+
       <div className="flex items-center justify-between mb-4">
-        <h2 className="font-display text-lg font-semibold text-white flex items-center gap-2">
+        <h2
+          ref={headingRef}
+          tabIndex={-1}
+          className="font-display text-lg font-semibold text-white flex items-center gap-2 outline-none focus-visible:ring-2 focus-visible:ring-stellar-400 rounded-sm"
+        >
           <CalendarIcon className="w-5 h-5 text-stellar-400" />
           Recurring Payment Schedules
         </h2>
@@ -452,17 +496,24 @@ export default function RecurringPayments({ onPayNow }: RecurringPaymentsProps) 
                     {s.frequency}
                   </span>
                   {s.paused && (
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 font-medium">
-                      Paused
+                    <span 
+                      className="text-xs text-amber-400 font-medium"
+                      aria-label={s.pausedAt ? `Paused on ${formatDate(toISODate(new Date(s.pausedAt)))}` : 'Paused'}
+                    >
+                      · Paused {s.pausedAt ? `on ${formatDate(toISODate(new Date(s.pausedAt)))}` : ''}
                     </span>
+                  )}
+                  {s.memo && (
+                    <span className="text-xs text-slate-500 truncate max-w-[120px]">· {s.memo}</span>
                   )}
                 </div>
                 <p className="text-xs font-mono text-slate-400 truncate">
                   To: {s.recipient}
                 </p>
-                {s.memo && <p className="text-xs text-slate-500 mt-0.5">Memo: {s.memo}</p>}
-                <p className="text-xs text-slate-400 mt-1">
-                  Next due: <span className="text-slate-200 font-medium">{s.nextDueDate}</span>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  <span aria-label={`Next run on ${formatDate(s.nextDueDate)}`}>
+                    Next: <span className="text-slate-300">{formatDate(s.nextDueDate)}</span>
+                  </span>
                 </p>
               </div>
 
